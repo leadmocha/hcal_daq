@@ -1,0 +1,22 @@
+; Setup prescalers (inputs 1-6) (setup is below)
+ps0=1, ; Cosmic trigger
+ps1=0, ; HCal pulser trigger
+ps2=0, ; Not connected
+ps3=0, ; Not connected
+ps4=0, ; Not connected
+ps5=0, ; Not connected
+; Configure what the input triggers are
+cosmicTrigger=0, ; Input 1
+pulserTrigger=1, ; Input 2
+; Setup FADC for Cosmic trigger
+fadc_window_lat=115,   ; For cosmic trigger
+fadc_window_width=20,  ; For cosmic trigger
+; Setup FADC for Pulser trigger
+;fadc_window_lat=160,    ; For pulser trigger
+;fadc_window_width=60,   ; For pulser trigger
+;
+; Setup HCal Pulser (used only if prescale > 0)
+pulser_nsteps=1,
+pulser_step0=1,pulser_nstep0=1000,
+pulser_step1=0,pulser_nstep1=1000,
+pulser_step2=2,pulser_nstep2=1000,
