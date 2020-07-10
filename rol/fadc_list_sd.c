@@ -30,12 +30,11 @@
 #define F1_LATENCY 2900
 #endif
 
+
 /* Decision on whether or not to enable the HCAL pulser
    - Comment out to disable HCAL pulser
 */
 #define ENABLE_HCAL_PULSER
-
-
 
 /*
 #ifdef TI_SLAVE
@@ -60,6 +59,7 @@ int tsCrate=1;
 #include "fadcLib.h"         /* Header for FADC250 library */
 #include "sdLib.h"  
 #include "remexLib.h"
+#include "hcal_usrstrutils.c" /* So we can read from a flags file */
 
 #ifdef ENABLE_HCAL_PULSER
 #include "hcalLib.h"
@@ -68,12 +68,20 @@ int tsCrate=1;
 /* FADC250 Global Definitions */
 #define FADC_START_SLOT       14    /* First ADC SLOT */
 int faMode=1;
-#define FADC_WINDOW_LAT       200  /* Trigger Window Latency */
-#define FADC_WINDOW_WIDTH     200  /* Trigger Window Width */
+int flag_FADC_WINDOW_LAT = 115; /* Should now be read from flags file! */
+int flag_FADC_WINDOW_WIDTH  = 20; /* Note, now read from flags file! */
+//#define FADC_WINDOW_LAT       200  /* Trigger Window Latency */
+//#define FADC_WINDOW_WIDTH     200  /* Trigger Window Width */
 /* New values for LED pulser 2019-06-01 */
 /* Settings for cosmic tests 10/7/2019 */
-#define FADC_WINDOW_LAT       133  /* Trigger Window Latency */
-#define FADC_WINDOW_WIDTH      20  /* Trigger Window Width */
+#ifdef ENABLE_HCAL_PULSER
+/* 2020-03-04 Pulser system*/
+//#define FADC_WINDOW_LAT       160 //160 for Pulser
+//#define FADC_WINDOW_WIDTH      60 //60 for Pulser
+#else /* Use cosmic trigger setup */
+//#define FADC_WINDOW_LAT       118 //133 for half detector. /* Trigger Window Latency */
+//#define FADC_WINDOW_WIDTH      20 //20 for half detector.  /* Trigger Window Width */
+#endif
 /* 2019-06-18 */
 //#define FADC_WINDOW_LAT       330  /* Trigger Window Latency */
 //#define FADC_WINDOW_WIDTH      80  /* Trigger Window Width */
@@ -88,6 +96,15 @@ int faMode=1;
 
 /* CTP */
 #define CTP_THRESHOLD    4000
+
+/* FLAGS */
+#define NINPUTS 6 /* 6 trigger inputs on the new TI */
+int flag_prescale[NINPUTS];
+/* Flags for HCal pulser */
+int flag_pulserTriggerInput;
+int flag_LED_NSTEPS; /* Number of steps in sequence */
+int flag_LED_STEP[50]; /* Step LED configuration */
+int flag_LED_NSTEP[50]; /* Number of triggers in this step */
 
 /* TEMPORARY */
 /* EXPERIMENT IMPLEMENTING THE F1 TDC IN THE READOUT */
@@ -125,14 +142,17 @@ unsigned int BLOCKLEVEL=1;
 
 #ifdef ENABLE_HCAL_PULSER
 #define HCAL_LED_NLIST 3 /* Number of steps in sequence */
+int flag_PULSER_ENABLED; /* Determined based on ps and nsteps */
 unsigned int HCAL_LED_COUNT = 0;
-unsigned int HCAL_LED_MAX_COUNT[50];
-unsigned int HCAL_LED_LIST[50];
-unsigned int HCAL_LED_LIST_ITER=0;
+unsigned int HCAL_LED_ITER=0;
+unsigned int HCAL_LED_C_STEP;
+unsigned int HCAL_LED_C_NSTEP;
 #endif
 
 /* function prototype */
 void rocTrigger(int arg);
+void readUserFlags();
+
 
 /****************************************
  *  DOWNLOAD
@@ -145,6 +165,9 @@ rocDownload()
   remexSetCmsgServer("sbs1");
   remexSetRedirect(1);
   remexInit(NULL,1);
+  
+  /* Read our flags files */
+  readUserFlags();
 
 
   /* Setup Address and data modes for DMA transfers
@@ -171,9 +194,6 @@ rocDownload()
   tiSetCrateID(0x15); /* ROC 1 */
 
   tiSetTriggerSource(TI_TRIGGER_TSINPUTS); 
-
-  /* Set needed TS input bits */
-  tiEnableTSInput( TI_TSINPUT_1 ); 
 
   /* Load the trigger table that associates 
      pins 21/22 | 23/24 | 25/26 : trigger1
@@ -206,7 +226,110 @@ rocDownload()
   tiSetBlockBufferLevel(BUFFERLEVEL);
 
   tiStatus(0);
+  
+#ifdef ENABLE_F1
+/* TEST: EXPERIMENT WITH IMPLEMENTING F1 TDC INTO READOUT */
+// F1
+//f1GStatus(0);
+  iFlag = 0x0; /* no SDC */
+  //iFlag |= 4;  /* read from file */
+  //iFlag |= 2;  /* Normal Resolution, Trigger matching */
+  iFlag |= 3;  /* Normal Resolution, Start Stop */
+  //iFlag |= 1;
 
+  f1Init(F1_ADDR,0x0,1,iFlag);
+  F1_SLOT = f1ID[0];
+
+  /* Setup F1TDC */
+  /*   f1Clear(F1_SLOT); */
+  /*   f1SetConfig(F1_SLOT,2,0xff); */
+  f1EnableData(F1_SLOT,0xff);
+  f1SetBlockLevel(F1_SLOT,1);
+  /*   f1DisableBusError(F1_SLOT); */
+  f1EnableBusError(F1_SLOT);
+  printf("F1 TDC Configuration: \n");
+  f1ConfigShow(0, 0);
+  printf("F1 TDC Status\n");
+  f1Status(F1_SLOT,0);
+  f1Clear(F1_SLOT);
+  f1SetWindow(0,F1_WINDOW,F1_LATENCY,0);
+  f1ConfigShow(0, 0);
+
+//MARCO: Sync reset to F1 - connect output of TI to input SYNC of F1 (for V1 only?)
+tiSetOutputPort(0,0,0,0);
+usleep(50000);
+tiSetOutputPort(1,1,1,1);
+usleep(50000);
+tiSetOutputPort(0,0,0,0);
+usleep(50000);
+  printf("\n\n\nF1 Status (again, after clearing and stuff...\n\n\n\n");
+  f1Status(F1_SLOT,0);
+  printf("\n\n\nEnd status of F1\n\n\n");
+#endif
+
+#ifdef ENABLE_HCAL_PULSER
+  hcalClkIn(0); /* Turn off LEDs at end of run */
+#endif
+
+
+  printf("rocDownload: User Download Executed\n");
+
+}
+
+
+/****************************************
+ *  PRESTART
+ ****************************************/
+void
+rocPrestart()
+{
+  unsigned short iflag;
+  int stat,islot;
+  int i,ti_input_triggers;
+
+  /* Read in the user flag files */
+  readUserFlags();
+
+  vmeDmaConfig(2,5,1); 
+  /* Set needed TS input bits */
+  ti_input_triggers = 0;
+  printf("prescales: ");
+  for(i = 0; i < NINPUTS; i++) {
+    ti_input_triggers |= (flag_prescale[i]>0)<<i;
+    printf("ps%d=%d ",i+1,flag_prescale[i]);
+  }
+  printf("\n");
+  tiEnableTSInput( ti_input_triggers ); 
+
+  /* Setup the prescales */
+  for(i = 0; i < NINPUTS; i++) {
+    if(flag_prescale[i]>0) {
+      tiSetInputPrescale(1<<i,flag_prescale[i]);
+    }
+  }
+
+  tiLoadTriggerTable(0);
+
+  tiSetTriggerHoldoff(1,10,0);
+  tiSetTriggerHoldoff(2,10,0);
+
+  /* Set the sync delay width to 0x40*32 = 2.048us */
+  tiSetSyncDelayWidth(0x54, 0x40, 1);
+
+  /* Set the SyncReset type to fixed 4 ms width */
+  tiSetSyncResetType(1);
+
+  /* Set the busy source to non-default value (no Switch Slot B busy) */
+/*   tiSetBusySource(TI_BUSY_LOOPBACK,1); */
+/*   tiSetBusySource(0,1); */
+
+  tiSetFiberDelay(0x40,FIBER_LATENCY_OFFSET);
+
+
+/*   tiSetup(21); */
+
+// 03Apr2013, moved this into ctpInit()
+/*   ctpFiberReset(); */
 
   /***************************************
    * FADC Setup 
@@ -257,7 +380,7 @@ rocDownload()
    */
   if(faMode == 1) /* Raw window Mode */
     //MAXFADCWORDS = NFADC * BLOCKLEVEL * (1+2+FADC_WINDOW_WIDTH*16) + 3;
-    MAXFADCWORDS = NFADC * BLOCKLEVEL * (1+1+2+(FADC_WINDOW_WIDTH*16)) + 3;
+    MAXFADCWORDS = NFADC * BLOCKLEVEL * (1+1+2+(flag_FADC_WINDOW_WIDTH*16)) + 3;
   else /* Pulse mode */
     MAXFADCWORDS = NFADC * BLOCKLEVEL * (1+2+32) + 2*32;
   /* Maximum TID words is easier to calculate, but we can be conservative, since
@@ -304,7 +427,7 @@ rocDownload()
       /*  Setup up to 1 pulse processed */
       /*  Setup for both ADC banks(0 - all channels 0-15) */
       /* Integral Pulse Data */
-      faSetProcMode(FA_SLOT,faMode,FADC_WINDOW_LAT,FADC_WINDOW_WIDTH,3,6,1,0);
+      faSetProcMode(FA_SLOT,faMode,flag_FADC_WINDOW_LAT,flag_FADC_WINDOW_WIDTH,3,6,1,0);
 	
       /* Bus errors to terminate block transfers (preferred) */
       faEnableBusError(FA_SLOT);
@@ -329,68 +452,7 @@ rocDownload()
   sdSetActiveVmeSlots(fadcSlotMask); /* Use the fadcSlotMask to configure the SD */
   sdStatus();
 
-  
-#ifdef ENABLE_F1
-/* TEST: EXPERIMENT WITH IMPLEMENTING F1 TDC INTO READOUT */
-// F1
-//f1GStatus(0);
-  iFlag = 0x0; /* no SDC */
-  //iFlag |= 4;  /* read from file */
-  //iFlag |= 2;  /* Normal Resolution, Trigger matching */
-  iFlag |= 3;  /* Normal Resolution, Start Stop */
-  //iFlag |= 1;
 
-  f1Init(F1_ADDR,0x0,1,iFlag);
-  F1_SLOT = f1ID[0];
-
-  /* Setup F1TDC */
-  /*   f1Clear(F1_SLOT); */
-  /*   f1SetConfig(F1_SLOT,2,0xff); */
-  f1EnableData(F1_SLOT,0xff);
-  f1SetBlockLevel(F1_SLOT,1);
-  /*   f1DisableBusError(F1_SLOT); */
-  f1EnableBusError(F1_SLOT);
-  printf("F1 TDC Configuration: \n");
-  f1ConfigShow(0, 0);
-  printf("F1 TDC Status\n");
-  f1Status(F1_SLOT,0);
-  f1Clear(F1_SLOT);
-  f1SetWindow(0,F1_WINDOW,F1_LATENCY,0);
-  f1ConfigShow(0, 0);
-
-//MARCO: Sync reset to F1 - connect output of TI to input SYNC of F1 (for V1 only?)
-tiSetOutputPort(0,0,0,0);
-usleep(50000);
-tiSetOutputPort(1,1,1,1);
-usleep(50000);
-tiSetOutputPort(0,0,0,0);
-usleep(50000);
-  printf("\n\n\nF1 Status (again, after clearing and stuff...\n\n\n\n");
-  f1Status(F1_SLOT,0);
-  printf("\n\n\nEnd status of F1\n\n\n");
-#endif
-
-#ifdef ENABLE_HCAL_PULSER
-  printf("Will enable HCAL PULSER!!!\n\n\n");
-  hcalClkIn(6); /* Turn on LED 6 at the end */
-#endif
-  printf("rocDownload: User Download Executed\n");
-
-}
-
-/****************************************
- *  PRESTART
- ****************************************/
-void
-rocPrestart()
-{
-  unsigned short iflag;
-  int stat,islot;
-
-/*   tiSetup(21); */
-
-// 03Apr2013, moved this into ctpInit()
-/*   ctpFiberReset(); */
 
   /* FADC Perform some resets, status */
   for(islot=0;islot<NFADC;islot++) 
@@ -418,71 +480,22 @@ rocPrestart()
   sdStatus();
 
 #ifdef ENABLE_HCAL_PULSER
-   /*
-  HCAL_LED_LIST[0] = 1<<(6-1); 
-  HCAL_LED_LIST[1] = 1<<(5-1);
-  HCAL_LED_LIST[2] = 1<<(4-1); 
-  HCAL_LED_LIST[3] = 1<<(3-1); 
-  HCAL_LED_LIST[4] = 1<<(2-1);
-  HCAL_LED_LIST[5] = 1<<(1-1);
-  HCAL_LED_LIST[6] = 0;
-  HCAL_LED_MAX_COUNT[0] = 1000;
-  HCAL_LED_MAX_COUNT[1] = 1000;
-  HCAL_LED_MAX_COUNT[2] = 1000;
-  HCAL_LED_MAX_COUNT[3] = 1000;
-  HCAL_LED_MAX_COUNT[4] = 1000;
-  HCAL_LED_MAX_COUNT[5] = 1000;
-  HCAL_LED_MAX_COUNT[6] = 1000;
-   */
-  /*
-  HCAL_LED_LIST[0] = 1<<(3-1); 
-  HCAL_LED_LIST[1] = 1<<(2-1);
-  HCAL_LED_MAX_COUNT[0] = 1000;
-  HCAL_LED_MAX_COUNT[1] = 1000;
-  */
+  if(flag_PULSER_ENABLED) {
+    HCAL_LED_ITER=0;
+    HCAL_LED_COUNT=0;
+    printf("HCAL Pulser sequence: ");
+    for(i = 0 ; i < flag_LED_NSTEPS; i++) {
+      printf(" %d/%d",flag_LED_STEP[i],flag_LED_NSTEP[i]);
+    }
+    printf("\n");
+    /* Clock in the first setting */
+    HCAL_LED_C_STEP = flag_LED_STEP[0];
+    HCAL_LED_C_NSTEP = flag_LED_NSTEP[0];
+    hcalClkIn(HCAL_LED_C_STEP);
+  } else {
+    hcalClkIn(0);
+  }
 
-
-  HCAL_LED_LIST[0] = 0; 
-  HCAL_LED_LIST[1] = 1<<(5-1);
-  HCAL_LED_LIST[2] = 1<<(4-1);
-  HCAL_LED_MAX_COUNT[0] = 1000;
-  HCAL_LED_MAX_COUNT[1] = 1000;
-  HCAL_LED_MAX_COUNT[2] = 1000;
-
-  /*
-  HCAL_LED_LIST[0] = 1<<(5-1); 
-  HCAL_LED_LIST[1] = 1<<(4-1);
-  HCAL_LED_LIST[2] = 1<<(3-1); 
-  HCAL_LED_LIST[3] = 1<<(2-1); 
-  HCAL_LED_LIST[4] = 1<<(1-1);
-  HCAL_LED_LIST[5] = 0;
-  HCAL_LED_MAX_COUNT[0] = 1000;
-  HCAL_LED_MAX_COUNT[1] = 1000;
-  HCAL_LED_MAX_COUNT[2] = 1000;
-  HCAL_LED_MAX_COUNT[3] = 1000;
-  HCAL_LED_MAX_COUNT[4] = 1000;
-  HCAL_LED_MAX_COUNT[5] = 1000;
-  */
-  /*
-  HCAL_LED_LIST[0] = 15; 
-  HCAL_LED_LIST[1] = 1<<(3-1);
-  HCAL_LED_LIST[2] = 1<<(2-1); 
-  HCAL_LED_LIST[3] = 1<<(1-1); 
-  HCAL_LED_LIST[4] = 0; // always want to have a pedestal measurement
-  HCAL_LED_MAX_COUNT[0] = 1000;
-  HCAL_LED_MAX_COUNT[1] = 1000;
-  HCAL_LED_MAX_COUNT[2] = 1000;
-  HCAL_LED_MAX_COUNT[3] = 1000;
-  HCAL_LED_MAX_COUNT[4] = 1000;
-  */
-
-  HCAL_LED_LIST_ITER=0;
-  HCAL_LED_COUNT=0;
-  printf("HCAL LED LIST: %d %d %d %d\n",HCAL_LED_LIST[0],
-    HCAL_LED_LIST[1], HCAL_LED_LIST[2], HCAL_LED_LIST[3]);
-
-  /* Clock in the first setting */
-  hcalClkIn(HCAL_LED_LIST[HCAL_LED_LIST_ITER]);
 #endif
 
   printf("rocPrestart: User Prestart Executed\n");
@@ -562,7 +575,7 @@ rocEnd()
   tiStatus(0);
   sdStatus();
 #ifdef ENABLE_HCAL_PULSER
-    hcalClkIn(16); /* Turn on LED 5 at the end */
+  hcalClkIn(0); /* Turn off LEDs at the end */
 #endif
   /* Turn off all output ports */
   tiSetOutputPort(0,0,0,0);
@@ -741,23 +754,28 @@ rocTrigger(int arg)
 #endif
 
 #ifdef ENABLE_HCAL_PULSER
-  HCAL_LED_COUNT++;
-  BANKOPEN(BANK_HCAL_PULSER,BT_UI4,0);
-  /**dma_dabufp++ = LSWAP(tiGetIntCount());*/
-  *dma_dabufp++ = LSWAP(HCAL_LED_LIST_ITER);
-  *dma_dabufp++ = LSWAP(HCAL_LED_LIST[HCAL_LED_LIST_ITER]);
-  *dma_dabufp++ = LSWAP(HCAL_LED_COUNT);
-  *dma_dabufp++ = LSWAP((HCAL_LED_LIST_ITER<<22)|(HCAL_LED_LIST[HCAL_LED_LIST_ITER]<<16)|HCAL_LED_COUNT);
-  BANKCLOSE;
-  /* Run the HCAL pulser clock in code */
-  if(HCAL_LED_COUNT>=HCAL_LED_MAX_COUNT[HCAL_LED_LIST_ITER]) {
-    HCAL_LED_COUNT=0;
-    HCAL_LED_LIST_ITER++;
-    if(HCAL_LED_LIST_ITER>=HCAL_LED_NLIST) {
-      HCAL_LED_LIST_ITER=0;
+  if(flag_PULSER_ENABLED) {
+    HCAL_LED_COUNT++;
+    BANKOPEN(BANK_HCAL_PULSER,BT_UI4,0);
+    /**dma_dabufp++ = LSWAP(tiGetIntCount());*/
+    *dma_dabufp++ = LSWAP(HCAL_LED_ITER);
+    *dma_dabufp++ = LSWAP(HCAL_LED_C_STEP);
+    *dma_dabufp++ = LSWAP(HCAL_LED_COUNT);
+    *dma_dabufp++ = LSWAP((HCAL_LED_ITER<<22)|(HCAL_LED_C_STEP<<16)|HCAL_LED_COUNT);
+    BANKCLOSE;
+    /* Run the HCAL pulser clock in code */
+    if(HCAL_LED_COUNT>=HCAL_LED_C_NSTEP) {
+      HCAL_LED_COUNT=0;
+      HCAL_LED_ITER++;
+      if(HCAL_LED_ITER>=flag_LED_NSTEPS) {
+        HCAL_LED_ITER=0;
+      }
+      HCAL_LED_C_STEP=flag_LED_STEP[HCAL_LED_ITER];
+      HCAL_LED_C_NSTEP=flag_LED_NSTEP[HCAL_LED_ITER];
+      printf("Clocking in HCAL LED: %2d, %2d (tircount:%d)\n",
+        HCAL_LED_ITER,HCAL_LED_C_STEP,tiGetIntCount());
+      hcalClkIn(HCAL_LED_C_STEP);
     }
-    printf("Clocking in HCAL LED: %2d, %2d (tircount:%d)\n",HCAL_LED_LIST_ITER,HCAL_LED_LIST[HCAL_LED_LIST_ITER],tiGetIntCount());
-    hcalClkIn(HCAL_LED_LIST[HCAL_LED_LIST_ITER]);
   }
 #endif
 
@@ -790,3 +808,47 @@ rocCleanup()
   remexClose();
 
 }
+
+/*  Read the user flags/configuration file. */
+void readUserFlags()
+{
+  int i;
+  char pstext[10];
+
+  printf("Reading user flags file.");
+  init_strings();
+  flag_pulserTriggerInput=getint("pulserTrigger");
+  /* Read the FADC configuration */
+  flag_FADC_WINDOW_LAT=getint("fadc_window_lat");
+  flag_FADC_WINDOW_WIDTH=getint("fadc_window_width");
+
+  /* Read prescales */
+  printf("prescales: ");
+  for(i = 0; i < NINPUTS; i++) {
+    sprintf(pstext,"ps%d",i);
+    flag_prescale[i] = getint(pstext);
+    printf("%s=%d, ",pstext,flag_prescale[i]);
+  }
+  printf("\n");
+
+#ifdef ENABLE_HCAL_PULSER
+  /* Read the hcal pulser step info */
+  if(flag_pulserTriggerInput >= 0 && flag_pulserTriggerInput <6) {
+    flag_PULSER_ENABLED = flag_prescale[flag_pulserTriggerInput];
+    if(flag_PULSER_ENABLED) {
+      flag_LED_NSTEPS=getint("pulser_nsteps");
+      char ptext[50];
+      for(i = 0; i < flag_LED_NSTEPS; i++) {
+        sprintf(ptext,"pulser_step%d",i);
+        flag_LED_STEP[i]  = getint(ptext);
+        sprintf(ptext,"pulser_nstep%d",i);
+        flag_LED_NSTEP[i] = getint(ptext);
+      }
+    }
+  } else {
+    flag_PULSER_ENABLED=0;
+  }
+#endif
+}
+
+
