@@ -51,9 +51,10 @@ CFLAGS			+= -Wall -g
 else
 CFLAGS			+= -O2
 endif
-SRC			= hcalLib.c
+SRC			= hcalLib.c hcalLibTest.c
 HDRS			= $(SRC:.c=.h)
 OBJ			= hcalLib.o
+PROGS                   = hcalLibTest
 
 ifeq ($(ARCH),Linux)
 all: echoarch $(LIBS)
@@ -61,8 +62,15 @@ else
 all: echoarch $(OBJ)
 endif
 
+test: $(PROGS)
+
+
 $(OBJ): $(SRC) $(HDRS)
 	$(CC) $(CFLAGS) -c -o $@ $(SRC)
+
+$(PROGS): $(SRC)
+	echo "Making $@"
+	$(CC) $(CFLAGS) -o $@ $(@:%=%.c) $(LIBS_$@) -lrt -ljvme -lti -lhcal
 
 $(LIBS): $(OBJ)
 	$(CC) -fpic -shared $(CFLAGS) -o $(@:%.a=%.so) $(SRC)
